@@ -33,6 +33,17 @@ webhooks, no open ports.
      deleted, the tool leaves the other side alone, logs it as an
      "orphaned link", and reports a count -- it does not guess which side
      was "right" and delete a live credential out from under you.
+- If you edit `scope_map.json` to point a company at a different Keeper
+  folder, existing links for records that moved with it are re-attached to
+  the new scope automatically on the next run rather than being silently
+  orphaned and duplicated.
+- Every record's push/create/link is isolated in a try/except: one bad
+  record (a transient API error, a duplicate title colliding during
+  `--bootstrap-match-title`, a state-DB write failure) is logged and counted
+  in the run's error total without aborting the rest of the scope. A create
+  that fails to persist its link is logged loudly, naming both sides, since
+  that's the one case that can leave a live, untracked duplicate credential
+  behind for a human to reconcile.
 
 ## Conflict handling
 

@@ -56,9 +56,16 @@ def _load_scope_mappings(path: str | None) -> list[ScopeMapping]:
     if not os.path.isfile(path):
         raise ConfigError(f"Scope mapping file not found: {path}")
     with open(path, encoding="utf-8") as fh:
-        raw = json.load(fh)
+        try:
+            raw = json.load(fh)
+        except json.JSONDecodeError as exc:
+            raise ConfigError(f"Scope mapping file is not valid JSON: {path}: {exc}") from exc
+    if not isinstance(raw, list):
+        raise ConfigError(f"Scope mapping file must contain a JSON array of entries: {path}")
     mappings = []
     for entry in raw:
+        if not isinstance(entry, dict):
+            raise ConfigError(f"Scope mapping entry must be a JSON object: {entry!r}")
         try:
             mappings.append(
                 ScopeMapping(
@@ -104,6 +111,12 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     if conflict_winner not in ("hudu", "keeper"):
         raise ConfigError("CONFLICT_WINNER must be 'hudu' or 'keeper'")
 
+    timeout_raw = e.get("REQUEST_TIMEOUT_SECONDS") or "30"
+    try:
+        request_timeout_seconds = float(timeout_raw)
+    except ValueError as exc:
+        raise ConfigError(f"REQUEST_TIMEOUT_SECONDS must be a number, got {timeout_raw!r}") from exc
+
     return Config(
         hudu_base_url=hudu_base_url,
         hudu_api_key=hudu_api_key,
@@ -111,5 +124,5 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         scope_mappings=_load_scope_mappings(scope_map_path),
         state_db_path=e.get("STATE_DB_PATH", "hudu_keeper_sync_state.db"),
         conflict_winner=conflict_winner,
-        request_timeout_seconds=float(e.get("REQUEST_TIMEOUT_SECONDS", "30")),
+        request_timeout_seconds=request_timeout_seconds,
     )

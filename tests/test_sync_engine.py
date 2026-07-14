@@ -204,3 +204,67 @@ def test_unchanged_records_are_noop(config, state):
     assert stats.unchanged == 1
     assert stats.updated_in_hudu == 0
     assert stats.updated_in_keeper == 0
+
+
+def test_bootstrap_match_duplicate_titles_does_not_crash(config, state):
+    hudu = FakeHuduClient()
+    keeper = FakeKeeperClient()
+    hudu.seed(scope=COMPANY, title="Dup", username="u1", password="p1", url="")
+    hudu.seed(scope=COMPANY, title="Dup", username="u2", password="p2", url="")
+    keeper.seed(scope=FOLDER, title="Dup", username="u1", password="p1", url="")
+
+    stats = run_sync(config, hudu, keeper, state, bootstrap_match_title=True)
+
+    assert stats.errors == []
+    # One Hudu record bootstrap-matches the existing Keeper record; the other
+    # (same title, but its match was already consumed) falls through to
+    # normal creation instead of colliding on the same keeper_uid.
+    assert stats.created_in_keeper == 1
+    assert len(state.all_links()) == 2
+    assert len(keeper.list_records(FOLDER)) == 2
+
+
+def test_scope_remap_self_heals_when_record_is_found_in_new_scope(config, state):
+    hudu = FakeHuduClient()
+    keeper = FakeKeeperClient()
+    hudu.seed(scope=COMPANY, title="Shared", username="u", password="p", url="")
+    run_sync(config, hudu, keeper, state)
+
+    link_before = state.all_links()[0]
+    assert link_before.keeper_folder_uid == FOLDER
+
+    new_folder = "folder-xyz"
+    [keeper_rec] = keeper.list_records(FOLDER)
+    keeper._records[keeper_rec.source_id] = dataclasses.replace(keeper_rec, scope=new_folder)
+    remapped_config = dataclasses.replace(
+        config, scope_mappings=[ScopeMapping(hudu_company_id=COMPANY, keeper_folder_uid=new_folder)]
+    )
+
+    stats = run_sync(remapped_config, hudu, keeper, state)
+
+    assert stats.created_in_hudu == 0
+    assert stats.created_in_keeper == 0
+    assert stats.orphaned_links == 0
+    assert len(state.all_links()) == 1
+    link_after = state.get_by_hudu_id(link_before.hudu_id)
+    assert link_after.keeper_folder_uid == new_folder
+
+
+def test_create_failure_on_one_record_does_not_abort_the_rest_of_the_scope(config, state):
+    class FlakyKeeperClient(FakeKeeperClient):
+        def create_record(self, record):
+            if record.title == "Boom":
+                raise RuntimeError("simulated create failure")
+            return super().create_record(record)
+
+    hudu = FakeHuduClient()
+    keeper = FlakyKeeperClient()
+    hudu.seed(scope=COMPANY, title="Boom", username="u", password="p", url="")
+    hudu.seed(scope=COMPANY, title="Fine", username="u", password="p", url="")
+
+    stats = run_sync(config, hudu, keeper, state)
+
+    assert stats.created_in_keeper == 1
+    assert len(stats.errors) == 1
+    assert "Boom" in stats.errors[0]
+    assert {r.title for r in keeper.list_records(FOLDER)} == {"Fine"}

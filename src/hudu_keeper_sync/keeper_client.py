@@ -8,10 +8,11 @@ Records are stored as the standard "login" record type, using its `login`,
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 
 from keeper_secrets_manager_core import SecretsManager
-from keeper_secrets_manager_core.core import QueryOptions
+from keeper_secrets_manager_core.core import CreateOptions, QueryOptions
 from keeper_secrets_manager_core.dto.dtos import Record, RecordCreate, RecordField
 from keeper_secrets_manager_core.storage import FileKeyValueStorage
 
@@ -28,6 +29,7 @@ class KeeperClientError(RuntimeError):
 class KeeperClient:
     config_path: str
     _sm: SecretsManager | None = None
+    _folders_cache: list | None = None
 
     def __post_init__(self) -> None:
         if self._sm is None:
@@ -55,29 +57,41 @@ class KeeperClient:
             RecordField(field_type="password", value=record.password),
             RecordField(field_type="url", value=record.url),
         ]
-        if record.notes:
-            rc.notes = record.notes
-        uid = self._sm.create_secret(record.scope, rc)
-        created = self.get_record(uid)
-        if created is None:
-            raise KeeperClientError(f"Created Keeper record {uid} but could not read it back")
-        return created
+        rc.notes = record.notes
+
+        # create_secret() (the simpler SDK entrypoint) re-fetches and decrypts
+        # every record in every folder shared with this application on every
+        # call just to find the destination folder's key. create_secret_with_options()
+        # takes a pre-fetched folder list instead, so a whole sync run only
+        # pays for one (much cheaper) folder-metadata fetch no matter how many
+        # records it creates.
+        if self._folders_cache is None:
+            self._folders_cache = self._sm.get_folders()
+        uid = self._sm.create_secret_with_options(CreateOptions(record.scope, None), rc, folders=self._folders_cache)
+
+        return dataclasses.replace(record, source="keeper", source_id=uid)
 
     def update_record(self, uid: str, record: PasswordRecord) -> PasswordRecord:
         raw = self._sm.get_secrets(uids=[uid])
         if not raw:
             raise KeeperClientError(f"Keeper record {uid} not found")
         raw_record = raw[0]
+
+        # Title and notes are plain attributes/dict keys, not entries in the
+        # `fields` list, so they only make it into the payload that save()
+        # actually sends if they're set *before* the last set_standard_field_value()
+        # call below -- that call is what regenerates the record's encrypted
+        # raw_json from its current .dict. Setting them after, as a previous
+        # version of this code did for notes, silently drops the change: the
+        # save() succeeds, but the new value never reaches Keeper.
         raw_record.title = record.title
+        raw_record.dict["notes"] = record.notes
         raw_record.set_standard_field_value("login", record.username)
         raw_record.set_standard_field_value("password", record.password)
         raw_record.set_standard_field_value("url", record.url)
-        raw_record.dict["notes"] = record.notes
         self._sm.save(raw_record)
-        updated = self.get_record(uid)
-        if updated is None:
-            raise KeeperClientError(f"Updated Keeper record {uid} but could not read it back")
-        return updated
+
+        return dataclasses.replace(record, source="keeper", source_id=uid, scope=raw_record.folder_uid)
 
 
 def _to_password_record(r: Record, folder_uid: str) -> PasswordRecord:

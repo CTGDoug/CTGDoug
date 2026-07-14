@@ -14,6 +14,7 @@ Auth: header `x-api-key: <HUDU_API_KEY>`.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Any
 
@@ -100,7 +101,13 @@ class HuduClient:
         resp = self._request("PUT", f"/api/v1/asset_passwords/{password_id}", json=payload)
         body = resp.json()
         item = body.get("asset_password", body)
-        return _to_record(item)
+        updated = _to_record(item)
+        if not updated.scope:
+            # company_id is immutable and always present on a fetched record;
+            # if this particular API response omitted it, don't let the
+            # record silently lose its scope -- fetch it instead.
+            updated = dataclasses.replace(updated, scope=self.get_password(password_id).scope)
+        return updated
 
 
 def _to_record(item: dict[str, Any]) -> PasswordRecord:
